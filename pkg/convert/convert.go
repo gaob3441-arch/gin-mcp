@@ -72,8 +72,6 @@ func ConvertRoutesToTools(routes gin.RoutesInfo, registeredSchemas map[string]ty
 
 		filePath, handlerName := getHandlerInfo(route.HandlerFunc)
 
-		log.Printf("Processing route: %s %s -> Handler: %s (File: %s)", route.Method, route.Path, handlerName, filePath)
-
 		// Look up handler annotations: generated map first, then on-disk source
 		var handlerDoc *HandlerDoc
 		if generatedAnnotations != nil {
