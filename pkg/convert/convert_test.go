@@ -838,3 +838,102 @@ func HandlerWithExtraSpaces(c *gin.Context) {}
 	assert.Contains(t, doc.Tags, "users")
 	assert.Contains(t, doc.Tags, "admin")
 }
+
+func TestParseAnnotationLines(t *testing.T) {
+	comment := `summary line
+@summary List all items
+@description Returns a paginated list of items
+@tags public catalog
+@operationId listItems
+@param page Page number
+@param limit Items per page
+@return JSON array of items`
+
+	doc := ParseAnnotationLines(comment)
+	assert.NotNil(t, doc)
+	assert.Equal(t, "List all items", doc.Summary)
+	assert.Equal(t, "Returns a paginated list of items", doc.Description)
+	assert.Equal(t, "listItems", doc.OperationID)
+	assert.Equal(t, "JSON array of items", doc.Returns)
+	assert.Equal(t, map[string]string{"page": "Page number", "limit": "Items per page"}, doc.Params)
+	assert.Equal(t, []string{"public", "catalog"}, doc.Tags)
+}
+
+func TestParseAnnotationLines_Empty(t *testing.T) {
+	doc := ParseAnnotationLines("just a regular comment\nno annotations here")
+	assert.NotNil(t, doc)
+	assert.Empty(t, doc.Summary)
+	assert.Empty(t, doc.Description)
+	assert.Empty(t, doc.Tags)
+	assert.Empty(t, doc.Params)
+	assert.Empty(t, doc.OperationID)
+	assert.Empty(t, doc.Returns)
+}
+
+func TestGeneratedAnnotations_Priority(t *testing.T) {
+	// Inject generated annotations
+	SetGeneratedAnnotations(map[string]*HandlerDoc{
+		"noOpHandler": {
+			Summary:     "Generated summary",
+			Description: "Generated description",
+			Tags:        []string{"generated"},
+		},
+	})
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.GET("/products", noOpHandler)
+	routes := r.Routes()
+
+	tools, ops := ConvertRoutesToTools(routes, nil)
+	assert.NotNil(t, tools)
+	assert.NotNil(t, ops)
+
+	// Find the tool for GET /products
+	var found *types.Tool
+	for _, tool := range tools {
+		if tool.Name == "GET_products" {
+			found = &tool
+			break
+		}
+	}
+	require.NotNil(t, found, "Expected tool for GET /products")
+	assert.Contains(t, found.Description, "Generated summary")
+	assert.Contains(t, found.Description, "Generated description")
+	assert.Equal(t, []string{"generated"}, found.Tags)
+
+	// Clean up — reset for other tests
+	generatedAnnotations = nil
+}
+
+func TestGeneratedAnnotations_FallbackToSource(t *testing.T) {
+	// Handler not in generated map → should fall back to source parsing
+	SetGeneratedAnnotations(map[string]*HandlerDoc{
+		"someOtherHandler": {Summary: "Other"},
+	})
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.GET("/products", noOpHandler)
+	routes := r.Routes()
+
+	tools, _ := ConvertRoutesToTools(routes, nil)
+
+	var found *types.Tool
+	for _, tool := range tools {
+		if tool.Name == "GET_products" {
+			found = &tool
+			break
+		}
+	}
+	require.NotNil(t, found)
+	// noOpHandler has no annotations, so description falls back to default
+	assert.Contains(t, found.Description, "Handler for GET /products")
+
+	generatedAnnotations = nil
+}
+
+func TestSetGeneratedAnnotations_Nil(t *testing.T) {
+	SetGeneratedAnnotations(nil)
+	assert.Nil(t, generatedAnnotations)
+}

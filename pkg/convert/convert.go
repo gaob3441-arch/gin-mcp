@@ -2,8 +2,6 @@ package convert
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"reflect"
 	"regexp"
 	"runtime"
@@ -23,6 +21,18 @@ func isDebugMode() bool {
 	return gin.Mode() == gin.DebugMode
 }
 
+// generatedAnnotations holds handler docs that were pre-generated at build time
+// (via cmd/annotate-gen).  Keyed by handler function name, e.g. "listProducts".
+// When set, ConvertRoutesToTools checks this map first and only falls back to
+// on-disk source parsing when a handler is not found here.
+var generatedAnnotations map[string]*HandlerDoc
+
+// SetGeneratedAnnotations injects pre-generated annotation mappings.
+// The generated annotations_gen.go calls this in its init().
+func SetGeneratedAnnotations(m map[string]*HandlerDoc) {
+	generatedAnnotations = m
+}
+
 // ConvertRoutesToTools converts Gin routes into a list of MCP Tools and an operation map.
 func ConvertRoutesToTools(routes gin.RoutesInfo, registeredSchemas map[string]types.RegisteredSchemaInfo) ([]types.Tool, map[string]types.Operation) {
 	ttools := make([]types.Tool, 0)
@@ -38,8 +48,17 @@ func ConvertRoutesToTools(routes gin.RoutesInfo, registeredSchemas map[string]ty
 		operationID := strings.ToUpper(route.Method) + strings.ReplaceAll(strings.ReplaceAll(route.Path, "/", "_"), ":", "")
 
 		filePath, handlerName := getHandlerInfo(route.HandlerFunc)
-		// Parse handler function comments
-		handlerDoc, _ := parseHandlerComments(filePath, handlerName)
+
+		log.Printf("Processing route: %s %s -> Handler: %s (File: %s)", route.Method, route.Path, handlerName, filePath)
+
+		// Look up handler annotations: generated map first, then on-disk source
+		var handlerDoc *HandlerDoc
+		if generatedAnnotations != nil {
+			handlerDoc = generatedAnnotations[handlerName]
+		}
+		if handlerDoc == nil {
+			handlerDoc, _ = parseHandlerComments(filePath, handlerName)
+		}
 
 		// Override with custom @operationId if present
 		if handlerDoc != nil && handlerDoc.OperationID != "" {
@@ -293,67 +312,72 @@ func parseHandlerComments(filePath string, handlerName string) (*HandlerDoc, err
 		return nil, err
 	}
 
-	var doc *HandlerDoc
-
 	// Iterate through top-level declarations
 	for _, decl := range f.Decls {
 		if fn, ok := decl.(*ast.FuncDecl); ok {
 			if fn.Name.String() == handlerName {
-				doc = &HandlerDoc{
-					Params: make(map[string]string),
+				if fn.Doc == nil {
+					return nil, nil
 				}
-				if fn.Doc != nil {
-					// Parse comments
-					lines := strings.Split(fn.Doc.Text(), "\n")
-					for _, line := range lines {
-						line = strings.TrimSpace(line)
-						switch {
-						case strings.HasPrefix(line, "@summary"):
-							doc.Summary = strings.TrimSpace(strings.TrimPrefix(line, "@summary"))
-						case strings.HasPrefix(line, "@description"):
-							doc.Description = strings.TrimSpace(strings.TrimPrefix(line, "@description"))
-						case strings.HasPrefix(line, "@param"):
-							paramText := strings.TrimSpace(strings.TrimPrefix(line, "@param"))
-							parts := strings.SplitN(paramText, " ", 2)
-							if len(parts) == 2 {
-								paramName := strings.TrimSpace(parts[0])
-								paramDesc := strings.TrimSpace(parts[1])
-								doc.Params[paramName] = paramDesc
-							}
-						case strings.HasPrefix(line, "@return"):
-							doc.Returns = strings.TrimSpace(strings.TrimPrefix(line, "@return"))
-						case strings.HasPrefix(line, "@tags"):
-							tagsText := strings.TrimSpace(strings.TrimPrefix(line, "@tags"))
-							// Split on spaces and commas, trim whitespace, ignore empty entries
-							var tags []string
-							for _, sep := range []string{",", " "} {
-								parts := strings.Split(tagsText, sep)
-								for _, part := range parts {
-									trimmed := strings.TrimSpace(part)
-									if trimmed != "" && !contains(tags, trimmed) {
-										tags = append(tags, trimmed)
-									}
-								}
-								// After first pass with commas, rejoin and split by spaces
-								if sep == "," {
-									tagsText = strings.Join(tags, " ")
-									tags = []string{}
-								}
-							}
-							doc.Tags = tags
-						case strings.HasPrefix(line, "@operationId"):
-							opID := strings.TrimSpace(strings.TrimPrefix(line, "@operationId"))
-							if opID != "" && doc.OperationID == "" {
-								doc.OperationID = opID
-							}
-						}
-					}
-				}
+				return ParseAnnotationLines(fn.Doc.Text()), nil
 			}
 		}
 	}
 
-	return doc, nil
+	return nil, nil
+}
+
+// ParseAnnotationLines parses annotation tags from a comment text block.
+// Exported so the code generator can reuse the same parsing logic.
+func ParseAnnotationLines(commentText string) *HandlerDoc {
+	doc := &HandlerDoc{
+		Params: make(map[string]string),
+	}
+
+	lines := strings.Split(commentText, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "@summary"):
+			doc.Summary = strings.TrimSpace(strings.TrimPrefix(line, "@summary"))
+		case strings.HasPrefix(line, "@description"):
+			doc.Description = strings.TrimSpace(strings.TrimPrefix(line, "@description"))
+		case strings.HasPrefix(line, "@param"):
+			paramText := strings.TrimSpace(strings.TrimPrefix(line, "@param"))
+			parts := strings.SplitN(paramText, " ", 2)
+			if len(parts) == 2 {
+				paramName := strings.TrimSpace(parts[0])
+				paramDesc := strings.TrimSpace(parts[1])
+				doc.Params[paramName] = paramDesc
+			}
+		case strings.HasPrefix(line, "@return"):
+			doc.Returns = strings.TrimSpace(strings.TrimPrefix(line, "@return"))
+		case strings.HasPrefix(line, "@tags"):
+			tagsText := strings.TrimSpace(strings.TrimPrefix(line, "@tags"))
+			var tags []string
+			for _, sep := range []string{",", " "} {
+				parts := strings.Split(tagsText, sep)
+				for _, part := range parts {
+					trimmed := strings.TrimSpace(part)
+					if trimmed != "" && !contains(tags, trimmed) {
+						tags = append(tags, trimmed)
+					}
+				}
+				if sep == "," {
+					tagsText = strings.Join(tags, " ")
+					tags = []string{}
+				}
+			}
+			doc.Tags = tags
+		case strings.HasPrefix(line, "@operationId"):
+			opID := strings.TrimSpace(strings.TrimPrefix(line, "@operationId"))
+			if opID != "" && doc.OperationID == "" {
+				doc.OperationID = opID
+			}
+		}
+	}
+
+	return doc
 }
 
 func getHandlerInfo(handler gin.HandlerFunc) (string, string) {
@@ -386,75 +410,7 @@ func getHandlerInfo(handler gin.HandlerFunc) (string, string) {
 		shortName = strings.TrimPrefix(shortName[idx+1:], ".")
 	}
 
-	// When the handler is a method value (e.g. s.login), the Go compiler
-	// generates a wrapper whose source file is "<autogenerated>" — there is
-	// no real file on disk.  Fall back to searching the project source tree
-	// for the real function/method definition.
-	if filePath == "<autogenerated>" && shortName != "" {
-		if found := findFunctionFile(shortName); found != "" {
-			filePath = found
-		}
-	}
-
 	return filePath, shortName
-}
-
-// findFunctionFile walks the project source tree from the module root
-// (go.mod location) looking for a .go file that defines a function or
-// method named shortName.  Returns the absolute path on success.
-func findFunctionFile(shortName string) string {
-	// Locate the module root by walking up until go.mod is found.
-	root := "."
-	for i := 0; i < 10; i++ {
-		if _, err := os.Stat(filepath.Join(root, "go.mod")); err == nil {
-			break
-		}
-		root = filepath.Join(root, "..")
-	}
-	root, _ = filepath.Abs(root)
-
-	var found string
-	_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if d.IsDir() {
-			base := d.Name()
-			// Skip vendor / VCS / common noise directories.
-			if base == "vendor" || base == ".git" || base == "node_modules" ||
-				base == "testdata" || base == ".idea" || base == ".vscode" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") {
-			return nil
-		}
-		if found != "" {
-			return filepath.SkipAll
-		}
-
-		data, err := os.ReadFile(path)
-		if err != nil || len(data) > 512*1024 {
-			return nil
-		}
-		content := string(data)
-
-		// Match either a top-level function ("func login(") or a method
-		// ("func (s *Server) login(").  The regex avoids matching
-		// comments that happen to contain the word.
-		ok, _ := regexp.MatchString(`func\s+(\(.*\)\s+)?`+regexp.QuoteMeta(shortName)+`\s*\(`, content)
-		if ok {
-			found = path
-			return filepath.SkipAll
-		}
-		return nil
-	})
-
-	if found != "" {
-		found, _ = filepath.Abs(found)
-	}
-	return found
 }
 
 // contains checks if a string slice contains a specific string
