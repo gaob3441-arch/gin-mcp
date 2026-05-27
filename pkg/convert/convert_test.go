@@ -309,7 +309,7 @@ func TestGenerateInputSchema_NoParams(t *testing.T) {
 	route := gin.RouteInfo{Method: "GET", Path: "/simple"}
 	schemas := make(map[string]types.RegisteredSchemaInfo)
 
-	schema := generateInputSchema(route, schemas)
+	schema := generateInputSchema(route, schemas, nil)
 
 	require.NotNil(t, schema)
 	assert.Equal(t, "object", schema.Type)
@@ -321,7 +321,7 @@ func TestGenerateInputSchema_OnlyPathParams(t *testing.T) {
 	route := gin.RouteInfo{Method: "DELETE", Path: "/resource/:id/sub/:subId"}
 	schemas := make(map[string]types.RegisteredSchemaInfo)
 
-	schema := generateInputSchema(route, schemas)
+	schema := generateInputSchema(route, schemas, nil)
 
 	require.NotNil(t, schema)
 	assert.Equal(t, "object", schema.Type)
@@ -344,7 +344,7 @@ func TestGenerateInputSchema_WithPathAndQuery(t *testing.T) {
 		"GET /search/:topic": {QueryType: TestQuery{}},
 	}
 
-	schema := generateInputSchema(route, schemas)
+	schema := generateInputSchema(route, schemas, nil)
 
 	require.NotNil(t, schema)
 	assert.Equal(t, "object", schema.Type)
@@ -372,7 +372,7 @@ func TestGenerateInputSchema_WithPathAndBody(t *testing.T) {
 		"POST /create/:parentId": {BodyType: TestBody{}},
 	}
 
-	schema := generateInputSchema(route, schemas)
+	schema := generateInputSchema(route, schemas, nil)
 
 	require.NotNil(t, schema)
 	assert.Equal(t, "object", schema.Type)
@@ -934,6 +934,153 @@ func TestGeneratedAnnotations_FallbackToSource(t *testing.T) {
 }
 
 func TestSetGeneratedAnnotations_Nil(t *testing.T) {
+	// nil is a no-op with merge semantics.
+	before := generatedAnnotations
 	SetGeneratedAnnotations(nil)
-	assert.Nil(t, generatedAnnotations)
+	assert.Equal(t, before, generatedAnnotations)
+}
+
+func TestSetGeneratedAnnotations_Merge(t *testing.T) {
+	SetGeneratedAnnotations(map[string]*HandlerDoc{
+		"handlerA": {Summary: "A"},
+	})
+	SetGeneratedAnnotations(map[string]*HandlerDoc{
+		"handlerB": {Summary: "B"},
+	})
+	// Both should be present after merge.
+	assert.Equal(t, "A", generatedAnnotations["handlerA"].Summary)
+	assert.Equal(t, "B", generatedAnnotations["handlerB"].Summary)
+
+	// Clean up
+	generatedAnnotations = nil
+}
+
+func TestParseAnnotationLines_Body(t *testing.T) {
+	comment := `@summary Login
+@body loginRequest
+@param username Username
+@operationId login`
+
+	doc := ParseAnnotationLines(comment)
+	assert.NotNil(t, doc)
+	assert.Equal(t, "loginRequest", doc.BodyTypeName)
+	assert.Equal(t, "Login", doc.Summary)
+	assert.Equal(t, "login", doc.OperationID)
+}
+
+func TestParseAnnotationLines_BodyOnly(t *testing.T) {
+	comment := `@body CreateProductRequest`
+
+	doc := ParseAnnotationLines(comment)
+	assert.NotNil(t, doc)
+	assert.Equal(t, "CreateProductRequest", doc.BodyTypeName)
+}
+
+func TestGenerateInputSchema_GeneratedStructBody(t *testing.T) {
+	// Inject generated struct metadata
+	SetGeneratedStructs(map[string]*types.StructMeta{
+		"loginRequest": {
+			Name: "loginRequest",
+			Fields: []types.FieldMeta{
+				{JSONName: "username", Type: "string", Required: true, Description: "Username for login"},
+				{JSONName: "password", Type: "string", Required: true, Description: "Password for login"},
+			},
+		},
+	})
+
+	route := gin.RouteInfo{Method: "POST", Path: "/auth/login"}
+	schemas := make(map[string]types.RegisteredSchemaInfo)
+	handlerDoc := &HandlerDoc{BodyTypeName: "loginRequest"}
+
+	schema := generateInputSchema(route, schemas, handlerDoc)
+
+	require.NotNil(t, schema)
+	assert.Equal(t, "object", schema.Type)
+	require.NotNil(t, schema.Properties)
+
+	// Should have username + password fields
+	assert.Len(t, schema.Properties, 2)
+	assert.Contains(t, schema.Properties, "username")
+	assert.Equal(t, "string", schema.Properties["username"].Type)
+	assert.Equal(t, "Username for login", schema.Properties["username"].Description)
+	assert.Contains(t, schema.Properties, "password")
+	assert.Equal(t, "string", schema.Properties["password"].Type)
+
+	// Both are required
+	assert.Len(t, schema.Required, 2)
+	assert.Contains(t, schema.Required, "username")
+	assert.Contains(t, schema.Required, "password")
+
+	// Clean up
+	generatedStructs = nil
+}
+
+func TestGenerateInputSchema_GeneratedStructBody_WithPathParam(t *testing.T) {
+	SetGeneratedStructs(map[string]*types.StructMeta{
+		"createReq": {
+			Name: "createReq",
+			Fields: []types.FieldMeta{
+				{JSONName: "name", Type: "string", Required: true},
+			},
+		},
+	})
+
+	route := gin.RouteInfo{Method: "POST", Path: "/items/:category"}
+	schemas := make(map[string]types.RegisteredSchemaInfo)
+	handlerDoc := &HandlerDoc{BodyTypeName: "createReq"}
+
+	schema := generateInputSchema(route, schemas, handlerDoc)
+
+	require.NotNil(t, schema)
+	// Path param + body field
+	assert.Len(t, schema.Properties, 2)
+	assert.Contains(t, schema.Properties, "category")
+	assert.Contains(t, schema.Properties, "name")
+	assert.Len(t, schema.Required, 2) // path param always required + body required
+
+	generatedStructs = nil
+}
+
+func TestGenerateInputSchema_RegisteredSchemaWinsOverGenerated(t *testing.T) {
+	// registeredSchemas should take priority over generatedStructs
+	SetGeneratedStructs(map[string]*types.StructMeta{
+		"loginRequest": {
+			Name:   "loginRequest",
+			Fields: []types.FieldMeta{{JSONName: "genField", Type: "string"}},
+		},
+	})
+
+	route := gin.RouteInfo{Method: "POST", Path: "/auth/login"}
+	schemas := map[string]types.RegisteredSchemaInfo{
+		"POST /auth/login": {BodyType: TestBody{}},
+	}
+	handlerDoc := &HandlerDoc{BodyTypeName: "loginRequest"}
+
+	schema := generateInputSchema(route, schemas, handlerDoc)
+
+	require.NotNil(t, schema)
+	// TestBody has bodyField + numField, NOT genField
+	assert.Contains(t, schema.Properties, "bodyField")
+	assert.Contains(t, schema.Properties, "numField")
+	assert.NotContains(t, schema.Properties, "genField")
+
+	generatedStructs = nil
+}
+
+func TestGenerateInputSchema_GETignoresBodyType(t *testing.T) {
+	// GET requests should NOT add body fields even with @body set
+	SetGeneratedStructs(map[string]*types.StructMeta{
+		"queryReq": {
+			Name:   "queryReq",
+			Fields: []types.FieldMeta{{JSONName: "filter", Type: "string"}},
+		},
+	})
+
+	route := gin.RouteInfo{Method: "GET", Path: "/search"}
+	handlerDoc := &HandlerDoc{BodyTypeName: "queryReq"}
+
+	schema := generateInputSchema(route, nil, handlerDoc)
+	assert.Empty(t, schema.Properties) // GET should not add body fields
+
+	generatedStructs = nil
 }

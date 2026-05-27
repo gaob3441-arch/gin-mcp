@@ -28,9 +28,32 @@ func isDebugMode() bool {
 var generatedAnnotations map[string]*HandlerDoc
 
 // SetGeneratedAnnotations injects pre-generated annotation mappings.
-// The generated annotations_gen.go calls this in its init().
+// Multiple packages may call this (via their own annotations_gen.go init());
+// later calls merge into the existing map so @body structs defined in a
+// different package are still resolved.
 func SetGeneratedAnnotations(m map[string]*HandlerDoc) {
-	generatedAnnotations = m
+	if generatedAnnotations == nil {
+		generatedAnnotations = m
+		return
+	}
+	for k, v := range m {
+		generatedAnnotations[k] = v
+	}
+}
+
+// generatedStructs holds pre-computed struct field metadata keyed by struct name.
+var generatedStructs map[string]*types.StructMeta
+
+// SetGeneratedStructs injects pre-computed struct metadata for @body resolution.
+// Merges with existing data so structs from different packages accumulate.
+func SetGeneratedStructs(m map[string]*types.StructMeta) {
+	if generatedStructs == nil {
+		generatedStructs = m
+		return
+	}
+	for k, v := range m {
+		generatedStructs[k] = v
+	}
 }
 
 // ConvertRoutesToTools converts Gin routes into a list of MCP Tools and an operation map.
@@ -96,7 +119,7 @@ func ConvertRoutesToTools(routes gin.RoutesInfo, registeredSchemas map[string]ty
 		}
 
 		// Generate schema for the tool's input
-		inputSchema := generateInputSchema(route, registeredSchemas)
+		inputSchema := generateInputSchema(route, registeredSchemas, handlerDoc)
 
 		// Add parameter descriptions to schema if available
 		if handlerDoc != nil && len(handlerDoc.Params) > 0 {
@@ -140,7 +163,7 @@ var PathParamRegex = regexp.MustCompile(`[:\*]([a-zA-Z0-9_]+)`)
 
 // generateInputSchema creates the JSON schema for the tool's input parameters.
 // This is a simplified version using basic reflection and not an external library.
-func generateInputSchema(route gin.RouteInfo, registeredSchemas map[string]types.RegisteredSchemaInfo) *types.JSONSchema {
+func generateInputSchema(route gin.RouteInfo, registeredSchemas map[string]types.RegisteredSchemaInfo, handlerDoc *HandlerDoc) *types.JSONSchema {
 	// Base schema structure
 	schema := &types.JSONSchema{
 		Type:       "object",
@@ -165,6 +188,7 @@ func generateInputSchema(route gin.RouteInfo, registeredSchemas map[string]types
 
 	// 2. Incorporate Registered Query and Body Types
 	schemaKey := route.Method + " " + route.Path
+	hasRegisteredBody := false
 	if schemaInfo, exists := registeredSchemas[schemaKey]; exists {
 		if isDebugMode() {
 			log.Printf("Using registered schema for %s", schemaKey)
@@ -178,6 +202,17 @@ func generateInputSchema(route gin.RouteInfo, registeredSchemas map[string]types
 		// Reflect Body Parameters (if applicable for method and type exists)
 		if (route.Method == "POST" || route.Method == "PUT" || route.Method == "PATCH") && schemaInfo.BodyType != nil {
 			reflectAndAddProperties(schemaInfo.BodyType, properties, &required, "body")
+			hasRegisteredBody = true
+		}
+	}
+
+	// 3. Incorporate @body struct from generated metadata (fallback when no registered body)
+	if !hasRegisteredBody &&
+		(route.Method == "POST" || route.Method == "PUT" || route.Method == "PATCH") &&
+		handlerDoc != nil && handlerDoc.BodyTypeName != "" &&
+		generatedStructs != nil {
+		if sm, ok := generatedStructs[handlerDoc.BodyTypeName]; ok {
+			addStructMetaToSchema(sm, properties, &required)
 		}
 	}
 
@@ -293,14 +328,33 @@ func reflectAndAddProperties(goType interface{}, properties map[string]*types.JS
 	}
 }
 
+// addStructMetaToSchema adds pre-computed struct field metadata to a JSON schema.
+func addStructMetaToSchema(sm *types.StructMeta, properties map[string]*types.JSONSchema, required *[]string) {
+	for _, fm := range sm.Fields {
+		propSchema := &types.JSONSchema{
+			Type:        fm.Type,
+			Description: fm.Description,
+		}
+		// Array type gets a placeholder items schema.
+		if fm.Type == "array" {
+			propSchema.Items = &types.JSONSchema{Type: "string"}
+		}
+		properties[fm.JSONName] = propSchema
+		if fm.Required {
+			*required = append(*required, fm.JSONName)
+		}
+	}
+}
+
 // HandlerDoc stores function documentation
 type HandlerDoc struct {
-	Summary     string
-	Description string
-	Params      map[string]string
-	Returns     string
-	Tags        []string
-	OperationID string
+	Summary      string
+	Description  string
+	Params       map[string]string
+	Returns      string
+	Tags         []string
+	OperationID  string
+	BodyTypeName string // name of the request-body struct (from @body annotation)
 }
 
 // parseHandlerComments parses function documentation from source code
@@ -373,6 +427,11 @@ func ParseAnnotationLines(commentText string) *HandlerDoc {
 			opID := strings.TrimSpace(strings.TrimPrefix(line, "@operationId"))
 			if opID != "" && doc.OperationID == "" {
 				doc.OperationID = opID
+			}
+		case strings.HasPrefix(line, "@body"):
+			bodyType := strings.TrimSpace(strings.TrimPrefix(line, "@body"))
+			if bodyType != "" && doc.BodyTypeName == "" {
+				doc.BodyTypeName = bodyType
 			}
 		}
 	}
