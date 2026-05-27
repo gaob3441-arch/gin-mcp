@@ -79,6 +79,12 @@ func ConvertRoutesToTools(routes gin.RoutesInfo, registeredSchemas map[string]ty
 		}
 		if handlerDoc == nil {
 			handlerDoc, _ = parseHandlerComments(filePath, handlerName)
+		} else if handlerDoc.QueryParams == nil {
+			// Generated annotations may not include @query params (added later
+			// via source comments). Fall back to on-disk parsing just for @query.
+			if sourceDoc, _ := parseHandlerComments(filePath, handlerName); sourceDoc != nil && sourceDoc.QueryParams != nil {
+				handlerDoc.QueryParams = sourceDoc.QueryParams
+			}
 		}
 
 		// Override with custom @operationId if present
@@ -141,11 +147,32 @@ func ConvertRoutesToTools(routes gin.RoutesInfo, registeredSchemas map[string]ty
 			Tags:        tags,
 		}
 
+		// Collect explicit query param names (deduplicated, order preserved)
+		var queryParamNames []string
+		seenQP := make(map[string]bool)
+
+		// Source 1: @query annotations from handler doc
+		if handlerDoc != nil {
+			for name := range handlerDoc.QueryParams {
+				if !seenQP[name] {
+					queryParamNames = append(queryParamNames, name)
+					seenQP[name] = true
+				}
+			}
+		}
+
+		// Source 2: RegisterSchema QueryType struct fields
+		schemaKey := route.Method + " " + route.Path
+		if schemaInfo, exists := registeredSchemas[schemaKey]; exists && schemaInfo.QueryType != nil {
+			collectStructFieldNames(schemaInfo.QueryType, &queryParamNames, &seenQP)
+		}
+
 		ttools = append(ttools, tool)
 		operations[operationID] = types.Operation{
-			Method: route.Method,
-			Path:   route.Path,
-			Tags:   tags,
+			Method:          route.Method,
+			Path:            route.Path,
+			Tags:            tags,
+			QueryParamNames: queryParamNames,
 		}
 	}
 
@@ -181,6 +208,30 @@ func generateInputSchema(route gin.RouteInfo, registeredSchemas map[string]types
 				Description: fmt.Sprintf("Path parameter: %s", paramName),
 			}
 			required = append(required, paramName) // Path params are always required
+		}
+	}
+
+	// 1.b Apply @query annotations from handler doc (before registered types)
+	if handlerDoc != nil && len(handlerDoc.QueryParams) > 0 {
+		for paramName, paramDesc := range handlerDoc.QueryParams {
+			// Emit warning if @query name conflicts with a path parameter
+			placeholder := ":" + paramName
+			if strings.Contains(route.Path, placeholder) {
+				log.Printf(
+					"Warning: @query '%s' conflicts with path parameter ':%s' in route %s %s. "+
+						"Path parameter takes precedence.",
+					paramName, paramName, route.Method, route.Path)
+			}
+
+			if _, exists := properties[paramName]; !exists {
+				properties[paramName] = &types.JSONSchema{
+					Type:        "string",
+					Description: paramDesc,
+				}
+			} else if paramDesc != "" {
+				// Merge description if property already defined (e.g. from path param)
+				properties[paramName].Description = paramDesc
+			}
 		}
 	}
 
@@ -353,6 +404,9 @@ type HandlerDoc struct {
 	Tags         []string
 	OperationID  string
 	BodyTypeName string // name of the request-body struct (from @body annotation)
+	// QueryParams stores parameters explicitly marked as query params via @query annotation.
+	// map[paramName]description
+	QueryParams map[string]string
 }
 
 // parseHandlerComments parses function documentation from source code
@@ -431,6 +485,22 @@ func ParseAnnotationLines(commentText string) *HandlerDoc {
 			if bodyType != "" && doc.BodyTypeName == "" {
 				doc.BodyTypeName = bodyType
 			}
+		case strings.HasPrefix(line, "@query"):
+			queryText := strings.TrimSpace(strings.TrimPrefix(line, "@query"))
+			parts := strings.SplitN(queryText, " ", 2)
+			if len(parts) >= 1 {
+				paramName := strings.TrimSpace(parts[0])
+				if paramName != "" {
+					paramDesc := ""
+					if len(parts) == 2 {
+						paramDesc = strings.TrimSpace(parts[1])
+					}
+					if doc.QueryParams == nil {
+						doc.QueryParams = make(map[string]string)
+					}
+					doc.QueryParams[paramName] = paramDesc
+				}
+			}
 		}
 	}
 
@@ -478,4 +548,41 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+// collectStructFieldNames extracts JSON-tag (or form-tag) field names from a Go
+// struct type and appends deduplicated names to *names via seen map. Used to
+// populate Operation.QueryParamNames from RegisterSchema QueryType.
+func collectStructFieldNames(goType interface{}, names *[]string, seen *map[string]bool) {
+	if goType == nil {
+		return
+	}
+	t := types.ReflectType(reflect.TypeOf(goType))
+	if t == nil || t.Kind() != reflect.Struct {
+		return
+	}
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		fieldName := f.Name
+		if jt := f.Tag.Get("json"); jt != "" {
+			parts := strings.Split(jt, ",")
+			if parts[0] == "-" {
+				continue
+			}
+			fieldName = parts[0]
+		} else if ft := f.Tag.Get("form"); ft != "" {
+			parts := strings.Split(ft, ",")
+			if parts[0] == "-" {
+				continue
+			}
+			fieldName = parts[0]
+		}
+		if !(*seen)[fieldName] {
+			*names = append(*names, fieldName)
+			(*seen)[fieldName] = true
+		}
+	}
 }

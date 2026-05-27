@@ -16,6 +16,10 @@ import (
 
 // --- Test Setup ---
 
+// @summary Test handler for query fallback
+// @query testParam A test query param used for fallback testing
+func testHandlerForQueryFallback(c *gin.Context) {}
+
 type TestQuery struct {
 	QueryParam string `form:"queryParam" json:"queryParam" jsonschema:"description=A query parameter"`
 	Optional   string `form:"optional,omitempty" json:"optional,omitempty"`
@@ -1084,3 +1088,190 @@ func TestGenerateInputSchema_GETignoresBodyType(t *testing.T) {
 
 	generatedStructs = nil
 }
+
+func TestParseAnnotationLines_QueryParams_Basic(t *testing.T) {
+	// go/ast strips // prefix — input is raw annotation lines
+	doc := ParseAnnotationLines("@query workspaceId 工作空间ID\n@query category 产品分类")
+	assert.NotNil(t, doc)
+	require.NotNil(t, doc.QueryParams)
+	assert.Len(t, doc.QueryParams, 2)
+	assert.Equal(t, "工作空间ID", doc.QueryParams["workspaceId"])
+	assert.Equal(t, "产品分类", doc.QueryParams["category"])
+}
+
+func TestParseAnnotationLines_QueryParams_NoDescription(t *testing.T) {
+	doc := ParseAnnotationLines("@query workspaceId")
+	assert.NotNil(t, doc)
+	require.NotNil(t, doc.QueryParams)
+	assert.Len(t, doc.QueryParams, 1)
+	assert.Equal(t, "", doc.QueryParams["workspaceId"])
+}
+
+func TestParseAnnotationLines_QueryParams_Empty(t *testing.T) {
+	doc := ParseAnnotationLines("just a comment, no annotations")
+	assert.NotNil(t, doc)
+	assert.Nil(t, doc.QueryParams)
+}
+
+func TestGenerateInputSchema_QueryAnnotations_Basic(t *testing.T) {
+	route := gin.RouteInfo{Method: "GET", Path: "/products"}
+	handlerDoc := &HandlerDoc{
+		QueryParams: map[string]string{
+			"workspaceId": "工作空间ID",
+			"category":    "产品分类",
+		},
+	}
+
+	schema := generateInputSchema(route, nil, handlerDoc)
+	require.NotNil(t, schema)
+	assert.Equal(t, 2, len(schema.Properties))
+	assert.Contains(t, schema.Properties, "workspaceId")
+	assert.Contains(t, schema.Properties, "category")
+	assert.Equal(t, "string", schema.Properties["workspaceId"].Type)
+	assert.Equal(t, "工作空间ID", schema.Properties["workspaceId"].Description)
+}
+
+func TestGenerateInputSchema_QueryAnnotations_WithPathParams(t *testing.T) {
+	route := gin.RouteInfo{Method: "GET", Path: "/products/:productId"}
+	handlerDoc := &HandlerDoc{
+		QueryParams: map[string]string{
+			"workspaceId": "工作空间ID",
+		},
+	}
+
+	schema := generateInputSchema(route, nil, handlerDoc)
+	require.NotNil(t, schema)
+	// Path param + query param
+	assert.Len(t, schema.Properties, 2)
+	assert.Contains(t, schema.Properties, "productId")
+	assert.Contains(t, schema.Properties, "workspaceId")
+}
+
+func TestGenerateInputSchema_QueryAnnotations_ConflictWithPathParam(t *testing.T) {
+	// @query workspaceId conflicts with :workspaceId path param — should warn
+	route := gin.RouteInfo{Method: "GET", Path: "/products/:workspaceId"}
+	handlerDoc := &HandlerDoc{
+		QueryParams: map[string]string{
+			"workspaceId": "工作空间ID from query",
+		},
+	}
+
+	schema := generateInputSchema(route, nil, handlerDoc)
+	require.NotNil(t, schema)
+	// workspaceId only appears once (path param takes priority)
+	assert.Len(t, schema.Properties, 1)
+	// Description should be merged from @query
+	assert.Equal(t, "工作空间ID from query", schema.Properties["workspaceId"].Description)
+}
+
+func TestGenerateInputSchema_QueryAnnotations_MultipleConflicts(t *testing.T) {
+	route := gin.RouteInfo{Method: "GET", Path: "/products/:workspaceId"}
+	handlerDoc := &HandlerDoc{
+		QueryParams: map[string]string{
+			"workspaceId": "工作空间ID",
+			"category":    "产品分类",
+		},
+	}
+
+	schema := generateInputSchema(route, nil, handlerDoc)
+	require.NotNil(t, schema)
+	// workspaceId (path param) + category (query only)
+	assert.Len(t, schema.Properties, 2)
+	assert.Contains(t, schema.Properties, "workspaceId")
+	assert.Contains(t, schema.Properties, "category")
+}
+
+func TestGeneratedAnnotations_MergeQueryParamsFromSource(t *testing.T) {
+	// Simulate generated annotations from annotate-gen that don't include
+	// @query params (added later by user in source comments).
+	SetGeneratedAnnotations(map[string]*HandlerDoc{
+		"testHandlerForQueryFallback": {
+			Summary: "Generated summary",
+			// Note: no QueryParams — the user added @query later in source
+		},
+	})
+
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.GET("/test", testHandlerForQueryFallback)
+	routes := r.Routes()
+
+	tools, _ := ConvertRoutesToTools(routes, nil)
+
+	var found *types.Tool
+	for _, tool := range tools {
+		if tool.Name == "GET_test" {
+			found = &tool
+			break
+		}
+	}
+	require.NotNil(t, found, "Expected tool for GET /test")
+	// Summary from generated annotations
+	assert.Contains(t, found.Description, "Generated summary")
+	// testParam from source @query should be merged in
+	assert.Contains(t, found.InputSchema.Properties, "testParam",
+		"@query testParam should be merged from source when generated lacks QueryParams")
+
+	generatedAnnotations = nil
+}
+
+func TestQueryParamNames_FromAnnotation(t *testing.T) {
+	// @query annotations produce QueryParamNames on Operation
+	route := gin.RouteInfo{
+		Method:      "GET",
+		Path:        "/products",
+		HandlerFunc: testHandlerForQueryFallback,
+	}
+	tools, ops := ConvertRoutesToTools(gin.RoutesInfo{route}, nil)
+	require.Len(t, tools, 1)
+	require.Len(t, ops, 1)
+
+	var op types.Operation
+	for _, v := range ops {
+		op = v
+	}
+	assert.Contains(t, op.QueryParamNames, "testParam",
+		"@query testParam should appear in Operation.QueryParamNames")
+}
+
+func TestQueryParamNames_FromRegisterSchema(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.GET("/search", noOpHandler)
+
+	schemas := map[string]types.RegisteredSchemaInfo{
+		"GET /search": {QueryType: TestQuery{}},
+	}
+	_, ops := ConvertRoutesToTools(r.Routes(), schemas)
+	require.NotEmpty(t, ops)
+
+	var op types.Operation
+	for k, v := range ops {
+		if k == "GET_search" {
+			op = v
+			break
+		}
+	}
+	require.NotEmpty(t, op.Method)
+	assert.Contains(t, op.QueryParamNames, "queryParam",
+		"TestQuery.QueryParam field should appear in QueryParamNames")
+	assert.Contains(t, op.QueryParamNames, "optional",
+		"TestQuery.Optional field should appear in QueryParamNames")
+	// Verify we don't duplicate between annotation and registered schema
+	assert.Len(t, op.QueryParamNames, 2)
+}
+
+func TestQueryParamNames_EmptyWithoutAnnotations(t *testing.T) {
+	gin.SetMode(gin.ReleaseMode)
+	r := gin.New()
+	r.GET("/plain", noOpHandler)
+	_, ops := ConvertRoutesToTools(r.Routes(), nil)
+
+	var op types.Operation
+	for _, v := range ops {
+		op = v
+	}
+	assert.Nil(t, op.QueryParamNames,
+		"No @query annotations → QueryParamNames should be nil")
+}
+

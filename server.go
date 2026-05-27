@@ -722,23 +722,65 @@ func (m *GinMCP) executeToolLogic(operation types.Operation, parameters map[stri
 	queryParams := url.Values{}
 	pathParams := make(map[string]string)
 
-	// Separate args into path params, query params, and body
+	// Build a lookup set of explicit query param names
+	queryNameSet := make(map[string]bool, len(operation.QueryParamNames))
+	for _, n := range operation.QueryParamNames {
+		queryNameSet[n] = true
+	}
+
+	// Separate args into path params, query params, and body — in that order.
+	// Phase 1: path params (match Gin's ":key" placeholders)
 	for key, value := range parameters {
-		// Check against Gin's format ":key"
 		placeholder := ":" + key
 		if strings.Contains(path, placeholder) {
-			// Store the actual value for substitution later
 			pathParams[key] = fmt.Sprintf("%v", value)
 			if isDebugMode() {
 				log.Printf("[Tool Execution] Found path parameter %s=%v", key, value)
 			}
+		}
+	}
+
+	// Phase 2: explicit query params (from @query annotation or RegisterSchema QueryType)
+	for key, value := range parameters {
+		if _, isPath := pathParams[key]; isPath {
+			continue
+		}
+		if queryNameSet[key] {
+			queryParams.Add(key, fmt.Sprintf("%v", value))
+			if isDebugMode() {
+				log.Printf("[Tool Execution] Added query parameter %s=%v", key, value)
+			}
+		}
+	}
+
+	// Phase 3: remaining params
+	//   GET/DELETE → query string   (fallback)
+	//   POST/PUT/PATCH → body      (fallback)
+	isWriteMethod := operation.Method == "POST" || operation.Method == "PUT" || operation.Method == "PATCH"
+	var bodyData map[string]interface{}
+	for key, value := range parameters {
+		if _, isPath := pathParams[key]; isPath {
+			continue
+		}
+		if queryNameSet[key] {
+			continue // already routed in phase 2
+		}
+		if isWriteMethod {
+			// Skip ID field for PUT requests since it's in the path
+			if key == "id" && operation.Method == "PUT" {
+				continue
+			}
+			if bodyData == nil {
+				bodyData = make(map[string]interface{})
+			}
+			bodyData[key] = value
+			if isDebugMode() {
+				log.Printf("[Tool Execution] Added body parameter %s=%v", key, value)
+			}
 		} else {
-			// Assume remaining args are query parameters for GET/DELETE
-			if operation.Method == "GET" || operation.Method == "DELETE" {
-				queryParams.Add(key, fmt.Sprintf("%v", value))
-				if isDebugMode() {
-					log.Printf("[Tool Execution] Added query parameter %s=%v", key, value)
-				}
+			queryParams.Add(key, fmt.Sprintf("%v", value))
+			if isDebugMode() {
+				log.Printf("[Tool Execution] Added query parameter %s=%v", key, value)
 			}
 		}
 	}
@@ -759,21 +801,7 @@ func (m *GinMCP) executeToolLogic(operation types.Operation, parameters map[stri
 
 	// 3. Create and execute the HTTP request
 	var reqBody io.Reader
-	if operation.Method == "POST" || operation.Method == "PUT" || operation.Method == "PATCH" {
-		// For POST/PUT/PATCH, send all non-path args in the body
-		bodyData := make(map[string]interface{})
-		for key, value := range parameters {
-			// Skip ID field for PUT requests since it's in the path
-			if key == "id" && operation.Method == "PUT" {
-				continue
-			}
-			if _, isPath := pathParams[key]; !isPath {
-				bodyData[key] = value
-				if isDebugMode() {
-					log.Printf("[Tool Execution] Added body parameter %s=%v", key, value)
-				}
-			}
-		}
+	if bodyData != nil {
 		bodyBytes, err := json.Marshal(bodyData)
 		if err != nil {
 			if isDebugMode() {

@@ -1,8 +1,11 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"sync"
 	"testing"
@@ -1170,4 +1173,138 @@ func TestHandleToolCall_CustomOperationId(t *testing.T) {
 	actualText, ok := contentItem["text"].(string)
 	assert.True(t, ok)
 	assert.JSONEq(t, `{"status":"executed"}`, actualText)
+}
+
+// TestExecuteToolLogic_QueryParamRouting verifies that executeToolLogic routes
+// parameters in the correct order: path → query → body.
+func TestExecuteToolLogic_QueryParamRouting(t *testing.T) {
+	// Test server that records how it was called
+	var capturedQuery url.Values
+	var capturedBody map[string]interface{}
+	var capturedPath string
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.Query()
+		capturedPath = r.URL.Path
+		if r.Body != nil {
+			json.NewDecoder(r.Body).Decode(&capturedBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer ts.Close()
+
+	baseURL := ts.URL
+
+	mcp := New(gin.New(), &Config{BaseURL: baseURL})
+
+	// Scenario: POST /items/:itemId with @query filter param
+	op := types.Operation{
+		Method:          "POST",
+		Path:            "/items/:itemId",
+		QueryParamNames: []string{"filter"}, // declared via @query
+	}
+
+	params := map[string]interface{}{
+		"itemId": "42",
+		"filter": "active",
+		"name":   "new item",
+	}
+
+	result, err := mcp.executeToolLogic(op, params, baseURL)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+
+	// Path param should be substituted
+	assert.Equal(t, "/items/42", capturedPath)
+	// "filter" should be in query string (it's in QueryParamNames)
+	assert.Equal(t, "active", capturedQuery.Get("filter"))
+	// "itemId" should NOT be in query or body (it's a path param)
+	assert.Empty(t, capturedQuery.Get("itemId"))
+	assert.NotContains(t, capturedBody, "itemId")
+	// "name" should be in the body
+	assert.Equal(t, "new item", capturedBody["name"])
+	// "filter" should NOT be in body
+	assert.NotContains(t, capturedBody, "filter")
+}
+
+// TestExecuteToolLogic_QueryParamRouting_GET verifies GET routes still route
+// all non-path params to query string regardless of QueryParamNames.
+func TestExecuteToolLogic_QueryParamRouting_GET(t *testing.T) {
+	var capturedQuery url.Values
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer ts.Close()
+
+	baseURL := ts.URL
+	mcp := New(gin.New(), &Config{BaseURL: baseURL})
+
+	// GET /search with @query filter, but also "sort" that isn't annotated
+	op := types.Operation{
+		Method:          "GET",
+		Path:            "/search",
+		QueryParamNames: []string{"filter"},
+	}
+
+	params := map[string]interface{}{
+		"filter": "active",
+		"sort":   "desc",
+		"page":   "1",
+	}
+
+	result, err := mcp.executeToolLogic(op, params, baseURL)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+
+	// All params go to query string in GET
+	assert.Equal(t, "active", capturedQuery.Get("filter"))
+	assert.Equal(t, "desc", capturedQuery.Get("sort"))
+	assert.Equal(t, "1", capturedQuery.Get("page"))
+}
+
+// TestExecuteToolLogic_NoQueryParamNames verifies backward compatibility:
+// POST routes without QueryParamNames route all non-path params to body.
+func TestExecuteToolLogic_NoQueryParamNames(t *testing.T) {
+	var capturedQuery url.Values
+	var capturedBody map[string]interface{}
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedQuery = r.URL.Query()
+		if r.Body != nil {
+			json.NewDecoder(r.Body).Decode(&capturedBody)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+	}))
+	defer ts.Close()
+
+	baseURL := ts.URL
+	mcp := New(gin.New(), &Config{BaseURL: baseURL})
+
+	// POST without any QueryParamNames
+	op := types.Operation{
+		Method: "POST",
+		Path:   "/submit",
+	}
+
+	params := map[string]interface{}{
+		"field1": "a",
+		"field2": "b",
+	}
+
+	result, err := mcp.executeToolLogic(op, params, baseURL)
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+
+	// No query params
+	assert.Empty(t, capturedQuery)
+	// All params in body
+	assert.Equal(t, "a", capturedBody["field1"])
+	assert.Equal(t, "b", capturedBody["field2"])
 }

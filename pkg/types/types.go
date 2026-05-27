@@ -63,9 +63,10 @@ type Tool struct {
 
 // Operation represents the mapping from a tool name (operation ID) to its underlying HTTP endpoint
 type Operation struct {
-	Method string   // HTTP Method (GET, POST, etc.)
-	Path   string   // Gin route path (e.g., /users/:id)
-	Tags   []string // Tags for filtering operations
+	Method          string   // HTTP Method (GET, POST, etc.)
+	Path            string   // Gin route path (e.g., /users/:id)
+	Tags            []string // Tags for filtering operations
+	QueryParamNames []string // parameter names explicitly declared as query params (via @query annotation or RegisterSchema QueryType)
 }
 
 // RegisteredSchemaInfo holds Go types associated with a specific route for schema generation

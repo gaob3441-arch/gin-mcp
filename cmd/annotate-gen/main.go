@@ -19,7 +19,7 @@ func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: annotate-gen [flags] <dir>\n\n")
 		fmt.Fprintf(os.Stderr, "Scans Go source files in <dir> for handler annotation comments\n")
-		fmt.Fprintf(os.Stderr, "(@summary, @description, @tags, @operationId, @param, @return, @body)\n")
+		fmt.Fprintf(os.Stderr, "(@summary, @description, @tags, @operationId, @param, @return, @body, @query)\n")
 		fmt.Fprintf(os.Stderr, "and struct definitions, then generates annotations_gen.go.\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
@@ -301,6 +301,7 @@ func isEmptyDoc(doc *convert.HandlerDoc) bool {
 	return doc.Summary == "" &&
 		doc.Description == "" &&
 		len(doc.Params) == 0 &&
+		len(doc.QueryParams) == 0 &&
 		len(doc.Tags) == 0 &&
 		doc.OperationID == "" &&
 		doc.Returns == "" &&
@@ -350,6 +351,14 @@ func writeGeneratedFile(path, pkgName string, docs map[string]*convert.HandlerDo
 				fmt.Fprintf(f, "\t\t\tParams: map[string]string{\n")
 				for _, k := range paramKeys {
 					fmt.Fprintf(f, "\t\t\t\t%q: %q,\n", k, doc.Params[k])
+				}
+				fmt.Fprintf(f, "\t\t\t},\n")
+			}
+			if len(doc.QueryParams) > 0 {
+				queryKeys := sortedStrKeys(doc.QueryParams)
+				fmt.Fprintf(f, "\t\t\tQueryParams: map[string]string{\n")
+				for _, k := range queryKeys {
+					fmt.Fprintf(f, "\t\t\t\t%q: %q,\n", k, doc.QueryParams[k])
 				}
 				fmt.Fprintf(f, "\t\t\t},\n")
 			}
