@@ -11,7 +11,7 @@ import (
 	"go/parser"
 	"go/token"
 
-	"github.com/ckanthony/gin-mcp/pkg/types"
+	"github.com/gaob3441-arch/gin-mcp/pkg/types"
 	"github.com/gin-gonic/gin"
 	log "github.com/sirupsen/logrus"
 )

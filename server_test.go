@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
-	transport "github.com/ckanthony/gin-mcp/pkg/transport"
-	"github.com/ckanthony/gin-mcp/pkg/types"
+	transport "github.com/gaob3441-arch/gin-mcp/pkg/transport"
+	"github.com/gaob3441-arch/gin-mcp/pkg/types"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 )

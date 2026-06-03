@@ -1,7 +1,7 @@
 # Gin-MCP: Zero-Config Gin to MCP Bridge
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/ckanthony/gin-mcp.svg)](https://pkg.go.dev/github.com/ckanthony/gin-mcp)
-[![CI](https://github.com/ckanthony/gin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ckanthony/gin-mcp/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/gaob3441-arch/gin-mcp.svg)](https://pkg.go.dev/github.com/gaob3441-arch/gin-mcp)
+[![CI](https://github.com/gaob3441-arch/gin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/gaob3441-arch/gin-mcp/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/ckanthony/gin-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/ckanthony/gin-mcp)
 ![](https://badge.mcpx.dev?type=dev 'MCP Dev')
 
@@ -50,7 +50,7 @@
 ## Installation
 
 ```bash
-go get github.com/ckanthony/gin-mcp
+go get github.com/gaob3441-arch/gin-mcp
 ```
 
 ## Basic Usage: Instant MCP Server
@@ -63,7 +63,7 @@ package main
 import (
 	"net/http"
 
-	server "github.com/ckanthony/gin-mcp/"
+	server "github.com/gaob3441-arch/gin-mcp/"
 	"github.com/gin-gonic/gin"
 )
 
@@ -166,7 +166,7 @@ package main
 
 import (
 	// ... other imports
-	"github.com/ckanthony/gin-mcp/pkg/server"
+	"github.com/gaob3441-arch/gin-mcp/pkg/server"
 	"github.com/gin-gonic/gin"
 )
 

@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ckanthony/gin-mcp/pkg/types"
+	"github.com/gaob3441-arch/gin-mcp/pkg/types"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

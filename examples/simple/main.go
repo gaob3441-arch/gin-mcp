@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	server "github.com/ckanthony/gin-mcp"
+	server "github.com/gaob3441-arch/gin-mcp"
 	"github.com/gin-gonic/gin"
 )
 
