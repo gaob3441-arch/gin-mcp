@@ -1,11 +1,11 @@
 # Gin-MCP: Zero-Config Gin to MCP Bridge
 
+> **Forked from [ckanthony/gin-mcp](https://github.com/ckanthony/gin-mcp).**
+> This fork adds compile-time annotation code generation, `@body` / `@query` annotations for explicit schema control, and Windows platform fixes. See [Fork Enhancements](#fork-enhancements) below for details.
+
 [![Go Reference](https://pkg.go.dev/badge/github.com/gaob3441-arch/gin-mcp.svg)](https://pkg.go.dev/github.com/gaob3441-arch/gin-mcp)
 [![CI](https://github.com/gaob3441-arch/gin-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/gaob3441-arch/gin-mcp/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/ckanthony/gin-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/ckanthony/gin-mcp)
 ![](https://badge.mcpx.dev?type=dev 'MCP Dev')
-
-[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/ckanthony/gin-mcp)](https://archestra.ai/mcp-catalog/ckanthony__gin-mcp)
 
 <table border="0">
   <tr>
@@ -42,6 +42,9 @@
 -   **Parameter Preservation:** Accurately reflects your Gin route parameters (path, query) in the generated MCP tools.
 -   **Dynamic BaseURL Resolution:** Support for proxy environments (Quicknode, RAGFlow) with per-user/deployment endpoints.
 -   **Customizable Schemas:** Manually register schemas for specific routes using `RegisterSchema` for fine-grained control.
+-   **Compile-Time Code Generation:** Pre-compute handler annotations and struct metadata at build time via `annotate-gen`, eliminating runtime source parsing.
+-   **`@body` Annotation:** Link a handler to a request-body struct for automatic body schema generation without `RegisterSchema`.
+-   **`@query` Annotation:** Declare query parameters with descriptions directly in handler comments.
 -   **Selective Exposure:** Filter which endpoints are exposed using operation IDs or tags.
 -   **Flexible Deployment:** Mount the MCP server within the same Gin app or deploy it separately.
 -   **Streamable HTTP Transport:** Opt in to MCP spec 2025-03-26 for stateless, load-balancer-friendly deployments with no session affinity required.
@@ -131,6 +134,8 @@ func listProducts(c *gin.Context) {
 -   **`@summary`** - Brief one-line description that becomes the tool's primary description
 -   **`@description`** - Additional detailed explanation appended to the summary
 -   **`@param <name> <text>`** - Attaches descriptive text to specific input parameters in the generated schema
+-   **`@body <TypeName>`** - Links a handler to a request-body struct for automatic body schema generation (see [@body Annotation](#body-annotation))
+-   **`@query <name> <text>`** - Explicitly declares a query parameter with description (see [@query Annotation](#query-annotation))
 -   **`@tags`** - Space or comma-separated tags used for filtering tools (see "Filtering Exposed Endpoints" below)
 -   **`@operationId <id>`** - Custom operation ID for the tool (overrides the default `METHOD_path` naming scheme). Must be unique across all routes; duplicates will be skipped (first declaration wins) with a warning logged.
 
@@ -152,6 +157,103 @@ func getUserProfile(c *gin.Context) {
 ```
 
 **Important:** Operation IDs must be unique. If two handlers use the same `@operationId`, the duplicate will be skipped entirely (first declaration wins), and a warning will always be logged. This ensures consistency between the tool list and operations map.
+
+### @body Annotation
+
+The `@body` annotation links a handler to a request-body struct. When used together with the [compile-time code generator](#compile-time-annotation-code-generation), schemas are built from pre-computed struct metadata — no runtime reflection or `RegisterSchema` call needed.
+
+```go
+// CreateProductRequest is the request body for product creation.
+type CreateProductRequest struct {
+	Name  string  `json:"name" jsonschema:"required,description=Product name"`
+	Price float64 `json:"price" jsonschema:"required,minimum=0,description=Product price"`
+}
+
+// createProduct handles product creation
+// @summary Create a new product
+// @body CreateProductRequest
+func createProduct(c *gin.Context) {
+    // Handler implementation...
+}
+```
+
+With `@body CreateProductRequest`, the code generator resolves the struct definition and pre-computes field metadata (`json` name, type, description, required). At runtime, the MCP tool's `inputSchema` includes the body properties automatically — equivalent to calling `mcp.RegisterSchema("POST", "/products", nil, CreateProductRequest{})`, but with zero runtime cost and no manual wiring.
+
+**How it works:**
+- The `@body` annotation stores the struct type name in the generated handler doc.
+- The code generator parses all struct definitions in the scanned packages and emits their `FieldMeta` (JSON name, type, description, required) into `annotations_gen.go`.
+- At runtime, `ConvertRoutesToTools` looks up the struct metadata and adds those fields to the input schema — no reflection required.
+
+Structs or individual fields can be excluded from code generation with the `//ignore-mcp` comment:
+
+```go
+//ignore-mcp
+type InternalConfig struct { ... }
+
+type User struct {
+	Name  string `json:"name"`
+	//ignore-mcp
+	InternalID string `json:"internal_id"`
+}
+```
+
+### @query Annotation
+
+The `@query` annotation explicitly declares a query parameter with an optional description. This is useful for GET/DELETE endpoints that accept query parameters which aren't path parameters.
+
+```go
+// listProducts retrieves a paginated list of products
+// @summary List all products
+// @query page Page number for pagination (default: 1)
+// @query limit Number of items per page (default: 10, max: 100)
+// @query tag Filter products by tag
+func listProducts(c *gin.Context) {
+    // Handler implementation...
+}
+```
+
+**How it works:**
+- Each `@query` declaration adds the parameter to the generated input schema with its description.
+- Query parameters are collected alongside path parameters but are not marked as required (they are optional by default, as MCP clients can omit them).
+- If a `@query` name conflicts with a path parameter (e.g., `@query id` on a route `/users/:id`), a warning is logged and the path parameter takes precedence.
+
+### Compile-Time Annotation Code Generation
+
+Instead of parsing Go source files at runtime to extract handler annotations and struct metadata, this fork introduces `cmd/annotate-gen` — a standalone code generator that runs at build time and produces an `annotations_gen.go` file.
+
+**Install:**
+```bash
+go install github.com/gaob3441-arch/gin-mcp/cmd/annotate-gen@latest
+```
+
+**Usage:**
+```bash
+# Scan a directory and generate annotations_gen.go
+annotate-gen ./backend/internal/server/
+
+# Specify output file
+annotate-gen -o ./generated/annotations.go ./backend/internal/server/
+```
+
+**What it generates:**
+A single `annotations_gen.go` file containing:
+- **Handler annotation map** — `@summary`, `@description`, `@param`, `@tags`, `@operationId`, `@body`, `@query`, `@return` for each annotated handler function.
+- **Struct metadata map** — Pre-computed `FieldMeta` (JSON name, type, description, required) for every struct definition found in the scanned packages.
+
+**Benefits:**
+- **Zero runtime parsing** — No AST parsing or file I/O at startup; all metadata is pre-computed.
+- **Cross-package merging** — Multiple packages can each generate their own `annotations_gen.go`; `SetGeneratedAnnotations` and `SetGeneratedStructs` merge them at init time.
+- **@body without reflection** — Struct schemas are built from compile-time metadata, not `reflect`.
+- **Deterministic** — Same input always produces the same output; no runtime variability.
+
+**Integration with build scripts:**
+```bash
+# Run before go build to keep generated files in sync
+go run github.com/gaob3441-arch/gin-mcp/cmd/annotate-gen ./backend/internal/server/
+go build ./...
+```
+
+At runtime, `ConvertRoutesToTools` checks the generated map first; if a handler is not found there, it falls back to on-disk source parsing for backward compatibility.
 
 ### Fine-Grained Schema Control with `RegisterSchema`
 
@@ -414,6 +516,20 @@ Once your Gin application with Gin-MCP is running:
     - **Continue**: Configure in VS Code settings
     - **Zed**: Add to MCP settings
 3.  The client will connect and automatically discover the available API tools.
+
+## Fork Enhancements
+
+This fork adds the following features on top of [ckanthony/gin-mcp](https://github.com/ckanthony/gin-mcp):
+
+| Feature | Description |
+|---|---|
+| **Compile-Time Code Generator** | `cmd/annotate-gen` pre-computes handler annotations and struct metadata at build time, eliminating runtime AST parsing and file I/O. |
+| **`@body` Annotation** | Links a handler to a request-body struct for automatic body schema generation. Works with the code generator to build schemas without `RegisterSchema` or runtime reflection. |
+| **`@query` Annotation** | Explicitly declares query parameters with descriptions in handler comments. Parameters appear in the generated input schema alongside path parameters. |
+| **Struct Metadata (`pkg/types`)** | `FieldMeta` / `StructMeta` types for pre-computed field schemas, and `RawMessage` type for JSON-RPC message handling. |
+| **`//ignore-mcp` Directive** | Exclude specific structs or fields from code generation. |
+| **Cross-Package Merging** | Multiple packages can each generate `annotations_gen.go`; `SetGeneratedAnnotations` merges them at init time. |
+| **Windows Compatibility** | Path separator and line-ending fixes for Windows development environments. |
 
 ## Contributing
 
