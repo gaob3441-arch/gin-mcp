@@ -128,20 +128,20 @@ func (s *SSETransport) HandleConnection(c *gin.Context) {
 	flusher.Flush()
 
 	// Send ready event
-	readyMsg := &types.MCPMessage{
-		Jsonrpc: "2.0",
-		Method:  "mcp-ready",
-		Params: map[string]interface{}{
-			"connectionId": connID,
-			"status":       "connected",
-			"protocol":     "2.0",
-		},
-	}
-	if err := writeSSEEvent(c.Writer, "message", readyMsg); err != nil {
-		log.Errorf("[SSE] Failed to send ready event: %v", err)
-		return
-	}
-	flusher.Flush()
+	// readyMsg := &types.MCPMessage{
+	// 	Jsonrpc: "2.0",
+	// 	Method:  "mcp-ready",
+	// 	Params: map[string]interface{}{
+	// 		"connectionId": connID,
+	// 		"status":       "connected",
+	// 		"protocol":     "2.0",
+	// 	},
+	// }
+	// if err := writeSSEEvent(c.Writer, "message", readyMsg); err != nil {
+	// 	log.Errorf("[SSE] Failed to send ready event: %v", err)
+	// 	return
+	// }
+	// flusher.Flush()
 
 	// Start keep-alive goroutine
 	go func() {

@@ -196,6 +196,7 @@ func (m *GinMCP) Mount(mountPath string) {
 		m.transport = transport.NewSSETransport(mountPath)
 	}
 	m.transport.RegisterHandler("initialize", m.handleInitialize)
+	m.transport.RegisterHandler("ping", m.handlePing)
 	m.transport.RegisterHandler("tools/list", m.handleToolsList)
 	m.transport.RegisterHandler("tools/call", m.handleToolCall)
 	m.transport.RegisterHandler("logging/setLevel", m.handleLoggingSetLevel)
@@ -358,6 +359,16 @@ func (m *GinMCP) handleToolsList(msg *types.MCPMessage) *types.MCPMessage {
 				"count":   len(m.tools),
 			},
 		},
+	}
+}
+
+// handlePing handles the ping request from clients (MCP spec utility method).
+// Returns an empty result to confirm the server is alive.
+func (m *GinMCP) handlePing(msg *types.MCPMessage) *types.MCPMessage {
+	return &types.MCPMessage{
+		Jsonrpc: "2.0",
+		ID:      msg.ID,
+		Result:  map[string]interface{}{},
 	}
 }
 
